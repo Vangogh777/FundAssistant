@@ -1,0 +1,93 @@
+/* 全局样式 */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+[data-theme='dark'] {
+  --bg-layout: #070f1e;
+  --bg-card: #0f1f3d;
+  --text-primary: #e8edf5;
+  --text-secondary: #8ca3c4;
+}
+
+[data-theme='light'] {
+  --bg-layout: #f5f7fa;
+  --bg-card: #ffffff;
+  --text-primary: #1a2233;
+  --text-secondary: #5a6a7e;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-layout);
+}
+
+/* 涨跌颜色 */
+.rise {
+  color: #ff4d4f !important;
+}
+.fall {
+  color: #52c41a !important;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e3a5f;
+  border-radius: 3px;
+}
+
+/* ====== 深色主题：强制覆盖 Input/Select 白色背景 ====== */
+[data-theme='dark'] .ant-input,
+[data-theme='dark'] .ant-input-affix-wrapper,
+[data-theme='dark'] .ant-input-outlined,
+[data-theme='dark'] .ant-input-filled,
+[data-theme='dark'] .ant-picker,
+[data-theme='dark'] .ant-select-selector,
+[data-theme='dark'] .ant-input-number,
+[data-theme='dark'] .ant-input-number-input {
+  background-color: #162d50 !important;
+  border-color: #1e3a5f !important;
+  color: #e8edf5 !important;
+}
+[data-theme='dark'] .ant-input::placeholder,
+[data-theme='dark'] .ant-input-affix-wrapper input::placeholder {
+  color: #5a7090 !important;
+}
+[data-theme='dark'] .ant-input-affix-wrapper .anticon {
+  color: #6a80a0 !important;
+}
+
+/* 深色下拉菜单 */
+[data-theme='dark'] .ant-select-dropdown {
+  background-color: #0f1f3d !important;
+}
+[data-theme='dark'] .ant-select-item {
+  color: #e8edf5 !important;
+}
+[data-theme='dark'] .ant-select-item-option-active {
+  background-color: #162d50 !important;
+}
+[data-theme='dark'] .ant-select-item-option-selected {
+  background-color: #1e3a5f !important;
+}
+
+/* 深色按钮主色无白边 */
+[data-theme='dark'] .ant-btn-primary {
+  border-color: #1677ff !important;
+  box-shadow: none !important;
+}
+
+/* 深色全局 */
+[data-theme='dark'] input:-webkit-autofill,
+[data-theme='dark'] input:-webkit-autofill:hover,
+[data-theme='dark'] input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #162d50 inset !important;
+  -webkit-text-fill-color: #e8edf5 !important;
+}
