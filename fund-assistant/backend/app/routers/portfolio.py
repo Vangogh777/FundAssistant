@@ -2,10 +2,12 @@
 持仓管理 API 路由 — 支持自动算净值 + 修改历史
 """
 import json
+import csv
+import io
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 
@@ -16,8 +18,9 @@ from app.models.fund import Fund
 from app.models.history import PortfolioHistory
 from app.schemas.fund import PortfolioCreate, PortfolioResponse, PortfolioHistoryResponse
 from app.utils.auth import get_current_user
-from app.services.fund_crawler import fetch_fund_estimate, fetch_fund_detail
+from app.services.fund_crawler import fetch_fund_estimate, fetch_fund_detail, fetch_multi_estimate
 from app.services.trade_calc import compute_shares_from_amount
+import re
 
 router = APIRouter(prefix="/api/portfolio", tags=["持仓管理"])
 
@@ -474,40 +477,245 @@ async def _fetch_hs300_benchmark(start_date: str, days: int) -> list[dict]:
         return []
 
 
+@router.post("/import-csv")
+async def import_csv(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    解析 CSV 文件并返回预览数据
+    支持两种格式：
+    1. 简单格式: 基金代码,份额,成本价 (每行一只，无表头)
+    2. 完整格式: 带表头，支持 基金代码,基金名称,份额,成本价,买入日期,备注
+    """
+    # 读取文件内容
+    content = await file.read()
+
+    # 处理 UTF-8 BOM
+    if content.startswith(b'\xef\xbb\xbf'):
+        content = content[3:]
+
+    # 尝试解码
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            text = content.decode('gbk')
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="文件编码不支持，请使用 UTF-8 或 GBK 编码")
+
+    # 解析 CSV
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="CSV 文件为空")
+
+    # 检测是否有表头
+    first_line = rows[0]
+    has_header = any(
+        keyword in str(cell) for cell in first_line
+        for keyword in ['基金代码', '代码', 'fund_code', 'code', 'Code']
+    )
+
+    if has_header:
+        rows = rows[1:]  # 跳过表头
+
+    results = []
+    errors = []
+
+    for idx, row in enumerate(rows, start=2 if has_header else 1):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+
+        try:
+            # 基本字段解析
+            fund_code = row[0].strip() if len(row) > 0 else ""
+            fund_name = ""
+            shares = 0.0
+            cost_per_share = 0.0
+            buy_date = ""
+            note = ""
+
+            # 简单格式: 代码,份额,成本价 (3列)
+            if len(row) == 3:
+                shares = float(row[1].strip()) if row[1].strip() else 0
+                cost_per_share = float(row[2].strip()) if row[2].strip() else 0
+            # 完整格式: 代码,名称,份额,成本价,买入日期,备注 (4列+)
+            elif len(row) >= 4:
+                fund_name = row[1].strip() if len(row) > 1 else ""
+                shares = float(row[2].strip()) if len(row) > 2 and row[2].strip() else 0
+                cost_per_share = float(row[3].strip()) if len(row) > 3 and row[3].strip() else 0
+                buy_date = row[4].strip() if len(row) > 4 else ""
+                note = row[5].strip() if len(row) > 5 else ""
+            else:
+                errors.append({"row": idx, "error": "数据列数不足，至少需要3列"})
+                continue
+
+            if not fund_code:
+                errors.append({"row": idx, "error": "基金代码为空"})
+                continue
+
+            # 验证基金代码格式 (6位数字)
+            if not re.match(r'^\d{6}$', fund_code):
+                errors.append({"row": idx, "fund_code": fund_code, "error": "基金代码格式错误，应为6位数字"})
+                continue
+
+            if shares <= 0:
+                errors.append({"row": idx, "fund_code": fund_code, "error": "份额必须大于0"})
+                continue
+
+            if cost_per_share <= 0:
+                errors.append({"row": idx, "fund_code": fund_code, "error": "成本价必须大于0"})
+                continue
+
+            # 验证基金代码有效性
+            fund_info = None
+            try:
+                est = await fetch_fund_estimate(fund_code)
+                if est and est.get("name"):
+                    fund_info = {
+                        "code": fund_code,
+                        "name": est.get("name", ""),
+                        "type": est.get("type", ""),
+                    }
+                else:
+                    detail = await fetch_fund_detail(fund_code)
+                    if detail and detail.get("name"):
+                        fund_info = {
+                            "code": fund_code,
+                            "name": detail.get("name", ""),
+                            "type": detail.get("type", ""),
+                        }
+            except Exception:
+                pass
+
+            if not fund_info:
+                errors.append({"row": idx, "fund_code": fund_code, "error": "基金代码无效或不存在"})
+                continue
+
+            results.append({
+                "row": idx,
+                "fund_code": fund_code,
+                "fund_name": fund_info["name"] or fund_name,
+                "fund_type": fund_info.get("type", ""),
+                "shares": shares,
+                "cost_per_share": cost_per_share,
+                "total_cost": round(shares * cost_per_share, 2),
+                "buy_date": buy_date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "note": note,
+                "valid": True,
+            })
+
+        except ValueError as e:
+            errors.append({"row": idx, "error": f"数据格式错误: {str(e)}"})
+        except Exception as e:
+            errors.append({"row": idx, "error": str(e)})
+
+    return {
+        "total": len(rows),
+        "valid": len(results),
+        "errors": errors,
+        "data": results,
+    }
+
+
+@router.post("/parse-codes")
+async def parse_fund_codes(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """批量解析基金代码，返回基金信息供预览"""
+    from app.services.fund_crawler import fetch_multi_estimate, fetch_fund_detail
+
+    codes_text = body.get("codes", "")
+    # 解析代码：支持逗号、换行、空格分隔
+    codes = re.findall(r'\b(\d{6})\b', codes_text)
+    codes = list(dict.fromkeys(codes))[:50]  # 去重，最多50只
+
+    if not codes:
+        return {"funds": [], "error": "未识别到有效的6位基金代码"}
+
+    # 批量获取估值
+    estimates = await fetch_multi_estimate(codes)
+    code_to_est = {e["code"]: e for e in estimates}
+
+    results = []
+    for code in codes:
+        est = code_to_est.get(code)
+        if est:
+            results.append({
+                "fund_code": code,
+                "fund_name": est.get("name", ""),
+                "nav": est.get("nav", 0),
+                "estimated_nav": est.get("estimated_nav", 0),
+                "estimate_change_pct": est.get("estimate_change_pct", 0),
+                "nav_date": est.get("nav_date", ""),
+                "valid": True,
+            })
+        else:
+            results.append({
+                "fund_code": code,
+                "fund_name": "未知基金",
+                "nav": 0,
+                "estimated_nav": 0,
+                "estimate_change_pct": 0,
+                "nav_date": "",
+                "valid": False,
+            })
+
+    return {"funds": results, "total": len(results), "valid": len([r for r in results if r["valid"]])}
+
+
 @router.post("/batch")
 async def batch_create(
     funds: list[dict],
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """批量导入持仓"""
+    """批量导入持仓 — 支持两种模式：
+    1. 市值模式: current_value + current_profit (从截图OCR)
+    2. 份额模式: shares + cost_per_share (从CSV导入)
+    """
     results = []
     for item in funds:
         code = item.get("fund_code", "")
         name = item.get("fund_name", "")
         current_value = float(item.get("current_value", 0))
         current_profit = float(item.get("current_profit", 0))
+        shares_input = float(item.get("shares", 0))
+        cost_input = float(item.get("cost_per_share", 0))
+        buy_date = item.get("buy_date", "")
+        note = item.get("note", "")
 
-        if current_value <= 0:
-            continue
+        nav_date = buy_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        total_spent = current_value - current_profit
-        if total_spent <= 0:
-            continue
+        # 模式1: 份额模式 (shares + cost_per_share)
+        if shares_input > 0 and cost_input > 0:
+            shares = shares_input
+            cost_per_share = cost_input
+            total_cost = round(shares * cost_per_share, 2)
+        # 模式2: 市值模式 (current_value + current_profit)
+        elif current_value > 0:
+            total_spent = current_value - current_profit
+            if total_spent <= 0:
+                continue
 
-        # 获取实时净值
-        if code:
-            est = await fetch_fund_estimate(code)
+            # 获取实时净值
+            if code:
+                est = await fetch_fund_estimate(code)
+            else:
+                est = None
+
+            live_nav = est.get("estimated_nav", 0) or est.get("nav", 0) if est else 0
+            if live_nav <= 0:
+                live_nav = 1.0  # fallback
+
+            shares = round(current_value / live_nav, 2)
+            cost_per_share = round(total_spent / shares, 4)
+            total_cost = round(shares * cost_per_share, 2)
         else:
-            est = None
-
-        live_nav = est.get("estimated_nav", 0) or est.get("nav", 0) if est else 0
-        if live_nav <= 0:
-            live_nav = 1.0  # fallback
-
-        shares = round(current_value / live_nav, 2)
-        cost_per_share = round(total_spent / shares, 4)
-        nav_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            continue
 
         # 如果有代码，确保基金存在
         if code:
@@ -518,18 +726,18 @@ async def batch_create(
             fund_code=code or name[:10],
             shares=shares,
             cost_per_share=cost_per_share,
-            total_cost=round(shares * cost_per_share, 2),
+            total_cost=total_cost,
             buy_date=nav_date,
-            note=f"同步导入: {name}",
+            note=note or f"批量导入: {name}",
         )
         db.add(portfolio)
         await db.flush()
         await _record_history(db, portfolio, current_user.id, "create", {},
                               _portfolio_to_dict(portfolio),
                               ["shares", "cost_per_share", "total_cost"],
-                              f"批量同步: {name} 市值¥{current_value}")
+                              f"批量导入: {name} {shares}份 @ ¥{cost_per_share}")
 
-        results.append({"name": name, "code": code, "status": "ok"})
+        results.append({"name": name, "code": code, "status": "ok", "shares": shares})
 
     await db.commit()
     return {"imported": len(results), "funds": results}

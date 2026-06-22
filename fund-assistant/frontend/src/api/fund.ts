@@ -7,6 +7,13 @@ export const fundApi = {
   // 持仓管理
   getPortfolios: () => client.get('/portfolio'),
   batchAddPortfolios: (funds: any[]) => client.post('/portfolio/batch', funds),
+  importCsv: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return client.post('/portfolio/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
   addPortfolio: (data: {
     fund_code: string;
     shares?: number;

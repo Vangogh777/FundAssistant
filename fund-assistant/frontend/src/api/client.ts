@@ -17,7 +17,8 @@ client.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config;
 });
 
-// 响应拦截：Token 过期自动刷新
+// 响应拦截：Token 过期自动刷新（跳过登录/注册/刷新请求）
+const AUTH_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/refresh'];
 let isRefreshing = false;
 let refreshSubscribers: ((token: string) => void)[] = [];
 
@@ -30,6 +31,11 @@ client.interceptors.response.use(
   response => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+
+    // 登录/注册/刷新接口的 401 直接透传，让调用方处理
+    if (originalRequest.url && AUTH_ENDPOINTS.some(e => originalRequest.url!.includes(e))) {
+      return Promise.reject(error);
+    }
 
     if (error.response?.status === 401 && !originalRequest._retry) {
       const refreshToken = localStorage.getItem('refresh_token');

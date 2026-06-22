@@ -1,2 +1,6 @@
 fund_assistant.db
 *.tsbuildinfo
+.claude/
+CLAUDE.md
+reasonix.toml
+*.bak
