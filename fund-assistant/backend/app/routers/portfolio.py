@@ -18,7 +18,7 @@ from app.models.fund import Fund
 from app.models.history import PortfolioHistory
 from app.schemas.fund import PortfolioCreate, PortfolioResponse, PortfolioHistoryResponse
 from app.utils.auth import get_current_user
-from app.services.fund_crawler import fetch_fund_estimate, fetch_fund_detail, fetch_multi_estimate
+from app.services.fund_crawler import fetch_fund_estimate, fetch_fund_detail, fetch_multi_estimate, fetch_latest_actual_nav, is_after_market_close
 from app.services.trade_calc import compute_shares_from_amount
 import re
 
@@ -102,20 +102,47 @@ async def list_portfolios(
     )
     portfolios = result.scalars().all()
 
+    # 判断当前是否应该使用官方净值（盘后 / 非交易日）
+    use_actual_nav = is_after_market_close()
+
     enriched = []
     for p in portfolios:
         f_result = await db.execute(select(Fund).where(Fund.code == p.fund_code))
         fund = f_result.scalar_one_or_none()
-        if not fund or fund.estimated_nav == 0:
+
+        if not fund:
+            # 基金不存在 → 先拉取基本信息
             est = await fetch_fund_estimate(p.fund_code)
-            if est and fund:
-                fund.estimated_nav = est.get("estimated_nav", 0)
-                fund.nav = est.get("nav", 0)
+            detail = await fetch_fund_detail(p.fund_code) if not est else None
+            fund = Fund(
+                code=p.fund_code,
+                name=est.get("name", "") if est else (detail.get("name", "") if detail else ""),
+                type=detail.get("type", "未知") if detail else "未知",
+            )
+            db.add(fund)
+            await db.flush()
+
+        if use_actual_nav:
+            # 盘后：获取官方确认净值
+            actual = await fetch_latest_actual_nav(p.fund_code)
+            if actual and actual.get("nav", 0) > 0:
+                fund.nav = actual["nav"]
+                fund.estimated_nav = actual["nav"]  # 官方净值作为当前值
+                fund.nav_date = actual["nav_date"]
+                fund.estimate_change_pct = actual.get("daily_change_pct", 0)
+        else:
+            # 盘中：获取实时估算
+            if fund.estimated_nav == 0 or fund.nav_date != datetime.now().strftime("%Y-%m-%d"):
+                est = await fetch_fund_estimate(p.fund_code)
+                if est:
+                    fund.estimated_nav = est.get("estimated_nav", 0)
+                    fund.nav = est.get("nav", 0)
+                    fund.nav_date = est.get("nav_date", "")
+                    fund.estimate_change_pct = est.get("estimate_change_pct", 0)
+
         enriched.append(_enrich_portfolio(p, fund))
 
-    if any(fund and fund.estimated_nav > 0 for _, fund in [(p, None) for p in portfolios]):
-        await db.commit()
-
+    await db.commit()
     return enriched
 
 
@@ -741,6 +768,102 @@ async def batch_create(
 
     await db.commit()
     return {"imported": len(results), "funds": results}
+
+
+@router.post("/refresh-navs")
+async def refresh_all_navs(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    刷新当前用户所有持仓基金的最新净值
+    - 盘后（≥18:00）：使用官方确认净值
+    - 盘中：使用实时估算净值
+    """
+    result = await db.execute(
+        select(Portfolio).where(Portfolio.user_id == current_user.id)
+    )
+    portfolios = result.scalars().all()
+    if not portfolios:
+        return {"message": "暂无持仓", "updated": 0}
+
+    codes = list(set(p.fund_code for p in portfolios))
+    use_actual = is_after_market_close()
+    updated = 0
+
+    for code in codes:
+        f_result = await db.execute(select(Fund).where(Fund.code == code))
+        fund = f_result.scalar_one_or_none()
+        if not fund:
+            continue
+
+        if use_actual:
+            actual = await fetch_latest_actual_nav(code)
+            if actual and actual.get("nav", 0) > 0:
+                fund.nav = actual["nav"]
+                fund.estimated_nav = actual["nav"]
+                fund.nav_date = actual["nav_date"]
+                fund.estimate_change_pct = actual.get("daily_change_pct", 0)
+                updated += 1
+        else:
+            est = await fetch_fund_estimate(code)
+            if est:
+                fund.estimated_nav = est.get("estimated_nav", 0)
+                fund.nav = est.get("nav", 0)
+                fund.nav_date = est.get("nav_date", "")
+                fund.estimate_change_pct = est.get("estimate_change_pct", 0)
+                updated += 1
+
+    await db.commit()
+    return {
+        "message": f"已刷新 {updated}/{len(codes)} 只基金的净值",
+        "total": len(codes),
+        "updated": updated,
+        "source": "actual" if use_actual else "estimate",
+    }
+
+
+@router.post("/refresh-all-navs")
+async def refresh_all_users_navs(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    【内部/定时任务用】刷新所有基金的最新净值
+    不依赖 current_user，由 scheduler 调用
+    """
+    result = await db.execute(select(Fund))
+    all_funds = result.scalars().all()
+    if not all_funds:
+        return {"message": "暂无基金数据", "updated": 0}
+
+    use_actual = is_after_market_close()
+    updated = 0
+
+    for fund in all_funds:
+        if use_actual:
+            actual = await fetch_latest_actual_nav(fund.code)
+            if actual and actual.get("nav", 0) > 0:
+                fund.nav = actual["nav"]
+                fund.estimated_nav = actual["nav"]
+                fund.nav_date = actual["nav_date"]
+                fund.estimate_change_pct = actual.get("daily_change_pct", 0)
+                updated += 1
+        else:
+            est = await fetch_fund_estimate(fund.code)
+            if est:
+                fund.estimated_nav = est.get("estimated_nav", 0)
+                fund.nav = est.get("nav", 0)
+                fund.nav_date = est.get("nav_date", "")
+                fund.estimate_change_pct = est.get("estimate_change_pct", 0)
+                updated += 1
+
+    await db.commit()
+    return {
+        "message": f"已刷新 {updated}/{len(all_funds)} 只基金的净值",
+        "total": len(all_funds),
+        "updated": updated,
+        "source": "actual" if use_actual else "estimate",
+    }
 
 
 @router.get("/{portfolio_id}/history", response_model=list[PortfolioHistoryResponse])

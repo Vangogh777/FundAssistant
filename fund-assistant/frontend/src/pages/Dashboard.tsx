@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Row, Col, Card, Statistic, Table, Spin, Typography, Tabs, Segmented, Space } from 'antd';
-import { RiseOutlined, FallOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { Row, Col, Card, Statistic, Table, Spin, Typography, Tabs, Segmented, Space, Button, message } from 'antd';
+import { RiseOutlined, FallOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { fundApi } from '@/api/fund';
+import client from '@/api/client';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 const { Text, Title } = Typography;
@@ -20,6 +21,7 @@ const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [analysis, setAnalysis] = useState<any>(null);
   const [period, setPeriod] = useState<Period>('all');
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => { loadData(); }, []);
 
@@ -28,6 +30,19 @@ const Dashboard: React.FC = () => {
     try { const res = await fundApi.getPortfolios(); setPortfolios(res.data); } catch {}
     try { const a = await fundApi.getPortfolioAnalysis(365); setAnalysis(a.data); } catch {}
     finally { setLoading(false); }
+  };
+
+  const handleRefreshNav = async () => {
+    setRefreshing(true);
+    try {
+      const res = await client.post('/portfolio/refresh-navs');
+      message.success(res.data?.message || '净值已刷新');
+      await loadData();
+    } catch {
+      message.error('刷新失败，请稍后重试');
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const totalCost = portfolios.reduce((s, p) => s + p.total_cost, 0);
@@ -118,7 +133,13 @@ const Dashboard: React.FC = () => {
   return (
     <div>
       {/* 顶部资产卡片 — 仿基金App */}
-      <Card style={{ marginBottom: 12, borderRadius: 12 }}>
+      <Card style={{ marginBottom: 12, borderRadius: 12 }}
+        extra={
+          <Button type="text" icon={<ReloadOutlined />} loading={refreshing}
+            onClick={handleRefreshNav} size="small" style={{ fontSize: 12 }}>
+            刷新净值
+          </Button>
+        }>
         <Text type="secondary">总资产（元）</Text>
         <Title level={2} style={{ margin: '4px 0' }}>¥{totalMarket.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}</Title>
         <Row gutter={16}>

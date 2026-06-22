@@ -88,6 +88,28 @@ async def scan_drip_reminders():
         await db.commit()
 
 
+async def refresh_all_fund_navs():
+    """定时任务：刷新所有基金的净值（盘后使用官方净值）"""
+    from app.routers.portfolio import refresh_all_users_navs_internal
+    async with async_session_factory() as db:
+        from app.models.fund import Fund
+        from app.services.fund_crawler import fetch_latest_actual_nav, is_after_market_close
+
+        result = await db.execute(select(Fund))
+        all_funds = result.scalars().all()
+        updated = 0
+        for fund in all_funds:
+            actual = await fetch_latest_actual_nav(fund.code)
+            if actual and actual.get("nav", 0) > 0:
+                fund.nav = actual["nav"]
+                fund.estimated_nav = actual["nav"]
+                fund.nav_date = actual["nav_date"]
+                fund.estimate_change_pct = actual.get("daily_change_pct", 0)
+                updated += 1
+        await db.commit()
+        print(f"[Scheduler] {datetime.now()} — 已刷新 {updated}/{len(all_funds)} 只基金净值")
+
+
 # 定时任务启动（由 APScheduler 调用）
 async def start_scheduler():
     """在 FastAPI 启动时注册定时扫描任务"""
@@ -97,8 +119,11 @@ async def start_scheduler():
     # 每天 9:00 扫描定投提醒
     scheduler.add_job(scan_drip_reminders, "cron", hour=9, minute=0, id="drip_reminder")
 
-    # 每个交易日 9:30-15:00 每5分钟更新行情（可选）
-    # scheduler.add_job(update_market, "cron", hour="9-15", minute="*/5", id="market_update")
+    # 每天 20:00 刷新基金官方净值（盘后净值已公布）
+    scheduler.add_job(refresh_all_fund_navs, "cron", hour=20, minute=0, id="nav_refresh_daily")
+
+    # 此外，每个整点也尝试刷新（盘中用估值，盘后用官方值）
+    scheduler.add_job(refresh_all_fund_navs, "cron", hour="9-23", minute=0, id="nav_refresh_hourly")
 
     scheduler.start()
     return scheduler

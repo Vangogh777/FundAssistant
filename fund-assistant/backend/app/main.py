@@ -5,12 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
 from app.routers import auth, funds, portfolio, market, analysis, drip, ocr
+from app.services.scheduler import start_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    scheduler = await start_scheduler()
     yield
+    scheduler.shutdown(wait=False)
 
 
 app = FastAPI(

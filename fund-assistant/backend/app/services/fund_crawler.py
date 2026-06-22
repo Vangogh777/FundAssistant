@@ -63,6 +63,38 @@ async def fetch_fund_estimate(code: str) -> dict | None:
         return None
 
 
+# 判断当前时间是否适合使用官方净值（盘后 ≥18:00 或非交易日）
+def is_after_market_close() -> bool:
+    """判断是否已过收盘且净值应该已公布"""
+    now = datetime.now()
+    # 非交易日：全天都应该是官方净值
+    # 交易日：15:00 收盘，一般 18:00-22:00 净值陆续公布
+    hour = now.hour
+    weekday = now.weekday()
+    if weekday >= 5:  # 周六日
+        return True
+    return hour >= 18
+
+
+async def fetch_latest_actual_nav(code: str) -> dict | None:
+    """获取基金最新官方确认净值（非估算），从历史净值接口获取"""
+    try:
+        history = await fetch_nav_history(code, days=10)
+        if not history:
+            return None
+        latest = history[0]  # fetch_nav_history 按日期降序排列
+        return {
+            "code": code,
+            "nav_date": latest["date"],
+            "nav": latest["nav"],
+            "accumulated_nav": latest.get("accumulated_nav", latest["nav"]),
+            "daily_change_pct": latest.get("daily_change_pct", 0),
+            "source": "actual",  # 标记为官方净值
+        }
+    except Exception:
+        return None
+
+
 async def fetch_multi_estimate(codes: list[str]) -> list[dict]:
     """批量获取多只基金的实时估值"""
     import asyncio
